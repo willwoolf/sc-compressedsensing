@@ -1,0 +1,577 @@
+\documentclass{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{verbatim}
+\usepackage{listings}
+\usepackage{float}
+\usepackage{dsfont}
+\usepackage[width=6in, height=8in]{geometry}
+\usepackage{xcolor}
+
+\usepackage[
+backend=biber,
+natbib=true,
+url=false, 
+doi=true,
+eprint=false
+]{biblatex}
+\addbibresource{sources.bib}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+	backgroundcolor=\color{backcolour},   
+	commentstyle=\color{codegreen},
+	keywordstyle=\color{magenta},
+	numberstyle=\tiny\color{codegray},
+	stringstyle=\color{codepurple},
+	basicstyle=\ttfamily\footnotesize,
+	breakatwhitespace=false,         
+	breaklines=true,                 
+	captionpos=b,                    
+	keepspaces=true,                 
+	numbers=left,                    
+	numbersep=5pt,                  
+	showspaces=false,                
+	showstringspaces=false,
+	showtabs=false,                  
+	tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\title{Compressed Sensing}
+\author{Will Woolfenden}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+% start with motivation for solving sles and why we look at graddesc
+
+% motivation of compressed sensing
+This report is concerned with iterative methods for solving systems of linear equations (SLEs),
+focusing on singular systems which are either over or under-determined.
+We are interested in compressive sensing, where we want to reconstruct a solution to an SLE given an insufficient amount of information to solve with common iterative methods.
+To start, we look at an implementation of the gradient descent method for solving the linear least squares problem for an overdetermined system.
+We then focus on an implementation of normalised iterative hard thresholding, with a focus instead on recovering a sparse solution to an SLE. 
+Compressed sensing arises in areas of signal processing, such as image and audio compression. For example, we may have the goal of reducing the information in an image as much as possible,
+such that we can reliably reconstruct the original image.
+
+This report covers the results produced using C++ implementations of steepest descent and normalised iterative hard thresholding.
+All code implementations are provided in the Appendix. The testing function has been commented into several sections in order to isolate bodies of tests.
+These can be uncommented, compiled and executed by the reader for verification.
+All code was compiled successfully on Ubuntu $22.04$ using the g++ $11$ compiler,
+with $\mathtt{-O2}$ optimisation, native hardware priority $\mathtt{-march=native}$ and accelerated floating point arithmetic $\mathtt{-ffast-math}$.
+
+\section{Steepest Descent}
+
+\subsection{Least Squares}
+
+We are interested in solving the {least squares problem} $\min_{x} ||{Ax}-{b}||_2$.
+The solution is computed by solving the \textit{normal equations} ${A}^\mathrm{T}{Ax} = {A}^\mathrm{T}{b}$.
+Our results compare different paths taken by the steepest descent algorithm to solve the normal equations for a least squares problem.
+% figures and stuff
+We first look at minimising $||Ax - b||_2$ for
+\begin{eqnarray*}
+    A &= \begin{bmatrix}
+        1 & 2 \\
+        2 & 1 \\
+        -1 & 0
+    \end{bmatrix},~~  b &= \begin{pmatrix}
+        10 \\
+        -1 \\
+        0
+    \end{pmatrix}.
+\end{eqnarray*}
+This system is over-determined, i.e. the number of constraints exceeds the number of variables $x_i$.
+We can analyse the least squares problem using the singular value decomposition $A = U \Sigma V^\mathrm{T}$.
+It can be shown that the first $r$ columns of the SVD span the range of $A$.
+We can use this knowledge to evaluate convergence of the least squares problem.
+Namely, we can only find a solution which solves $Ax = b$ when $b$ belongs to $\operatorname{range}(A)$.
+Otherwise, there is no such $x$ that will solve this system of linear equations.
+If this solution does not exist, then we search for the solution which minimises $||Ax-b||_2$,
+which is the Euclidean distance from $Ax$ to $b$.
+For a minimum $L2$-norm solution $x^*$, we have that $b-Ax^*$ must be orthogonal to any vector in $\operatorname{range}(A)$.
+We can use this criterion to test our solution.
+
+\subsection{Singular Value Decomposition Examples}
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{graddesc.eps}
+    \caption{
+        Gradient Descent implementations. Left: matrix $A = [1, 2; 2, 1; -1, 0]$.
+        Middle: matrix $A = [1, 2; 2, 1; 1.8, -2]$.
+        Right: matrix $A = [1, 2; 2, 1; -2, -2]$.
+        Top row is plots of $x$ for each step of the Steepest Descent algorithm.
+        Bottom row shows the $L2$-norm $||b-Ax||_2$.
+        Stopping criterion is for the residual $L2$-norm $r_i = ||A^\mathrm{T}(b - Ax_i)||_2$ to be below a given threshold.
+    }
+    \label{fig:graddesc}
+\end{figure}
+
+Any matrix has an SVD $A = U\Sigma V^\mathrm{T}$.
+If $A$ is ${n\times m}$ then so is ${\Sigma}$,
+where ${U} \in \mathds{R}^{n \times n}$ and ${V} \in \mathds{R}^{m \times m}$ are orthogonal matrices.
+The matrix ${\Sigma}$ has the singular values $\sigma_i$ on the diagonal in descending order,
+which are the square roots of the eigenvalues of ${A}^\mathrm{T}{A}$.
+Some of the singular values may be zero.
+We often write $\sigma_1 > \sigma_2 > \mathellipsis > \sigma_r > \sigma_{r+1} = \sigma_{r+2} = \mathellipsis = 0$.
+We use Octave for linear algebra results. See below:
+
+\begin{lstlisting}[language=MATLAB]
+octave:22> A
+A =
+   1   2
+   2   1
+  -1   0
+
+octave:23> [U,Z,V] = svd(A)
+U =
+  -0.6716   0.6911  -0.2673
+  -0.7000  -0.4735   0.5345
+   0.2428   0.5461   0.8018
+
+Z =
+Diagonal Matrix
+   3.0873        0
+        0   1.2120
+        0        0
+
+V =
+  -0.7497  -0.6618
+  -0.6618   0.7497
+\end{lstlisting}
+The optimum solution obtained by our gradient descent method is  $x^* \approx (  -2.57, 5.86)^\mathrm{T}$.
+These results correspond to section $(2)$ in the \texttt{main()} function.
+We compute the vector $b-Ax^*$ and find its inner products with the columns of $U$.
+\begin{lstlisting}[language=MATLAB]
+octave:27> x
+x =
+  -2.5714
+   5.8571
+
+octave:28> b
+b =
+   10
+   -1
+    0
+
+octave:29> (b-A*x)'*U
+ans =
+-4.8408e-15   1.7471e-15  -3.2071e+00
+\end{lstlisting}
+The inner products with the first two columns are extremely small - they are only non-zero since we are working in finite precision arithmetic.
+See Appendix \ref{sec:oct} for the inner products when looking at other cases.
+In the second case, we change the last row of $A$ to $[1.8, -2]$  and in the final case it is $[-2, -2]$.
+
+In every case, $Ax$ is simply a linear combination of its two spanning vectors which we find from the SVD.
+Therefore if $b-Ax^*$ is orthogonal to the first two columns of $U$ then $x^*$ is a minimum $L2$-norm solution.
+See Figure \ref{fig:graddesc} for visualisations of the Gradient Descent method.
+
+\subsection{Method}
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth]{leastsquare.eps}
+    \caption{
+        Graph of the objective function $f(x) = \frac{1}{2}||Ax-b||_2^2$.
+        Case $1$, where $A = [1, 2;2, 1;-1, 0]$.
+        We have solved for the minimiser $x^* = [-2.57, 5.85]^\mathrm{T}$,
+        which is clearly in the vicinity of the minimiser for this graph.
+    }
+    \label{fig:cvx}
+\end{figure}
+
+Each step of the Gradient Descent/Steepest Descent iteration is the step
+\begin{equation*}
+    x_{i+1} = x_i + \alpha_i r_i
+\end{equation*}
+where $r_i$ is the residual
+\begin{equation*}
+    r_i := A^\mathrm{T} \left(b - Ax_i\right)
+\end{equation*}
+to the normal equations $A^\mathrm{T} A x = A^\mathrm{T} b$,
+and $\alpha_i$ is the minimising step length
+\begin{equation*}
+	\alpha_i = \frac{r_i^\mathrm{T}r_i}{r_i^\mathrm{T}A^\mathrm{T} A r_i}.
+\end{equation*}
+We differentiate $||Ax-b||_2^2$, the squared distance, with respect to $x$ to find that a minimum is attained when $x$ solves the normal equations.
+\begin{align*}
+    \nabla ||Ax-b||_2^2 &= \nabla \left(
+        (Ax-b)^\mathrm{T} (Ax-b)
+    \right) \\
+    &= \nabla \left(
+        x^\mathrm{T} A^\mathrm{T} A x + b^\mathrm{T}b - x^\mathrm{T} A^\mathrm{T}b - b^\mathrm{T} Ax
+    \right) \\
+    &= 2A^\mathrm{T}Ax - 2A^\mathrm{T}b
+\end{align*}
+Clearly the solution to the normal equations is equivalent to when $\nabla ||Ax-b||_2^2 = 0$.
+This implies that our iterative method is of the form $x_{i+1} = x_i + \alpha_i \left( -\nabla f(x_i) \right)$ where $f(x_i)$ is the $L2$-norm we are trying to minimise.
+
+See Figure \ref{fig:graddesc} for the performance of the steepest descent implementation in three similar cases.
+Cases $1$ and $3$ show a zig-zag path taken, where the residual only points in one of two directions.
+For case $2$, the residual takes the path of a straight line and converges rapidly.
+
+In Figure \ref{fig:cvx}, we have graphed the objective function which we are trying to minimise from one case we have looked at.
+This convex function has a unique minimiser.
+The residual $r_i$ is the negative gradient of this function at $x_i$,
+which is the \textit{steepest descent direction} local to that point.
+Each iteration starts at a point $x_i$ and finds the appropriate descent direction.
+Consider the contours of the convex function.
+In order for the step length to be minimising, we must send $x_i$ to $x_{i+1}$ such that $r_i$ is tangent to the level set at $x_{i+1}$.
+Otherwise, further minimisation would be possible from $x_{i+1}$ in direction $r_i$.
+
+This requirement leads to the shapes of the paths taken in Figure \ref{fig:graddesc},
+namely that the descent direction alternates for each step.
+The second case lacks this appearance because the initial steepest descent direction points directly towards the unique minimiser,
+thus no alternate directions are chosen. However, it takes more than one iteration to converge, potentially due to machine imprecision.
+
+\section{Normalised Iterative Hard Thresholding}
+
+\subsection{Motivation}
+
+Having looked at an introduction for iterative methods for solving systems of linear equations,
+we now move on to the focus of this report, which is the implementation of the Normalised Iterative Hard Thresholding algorithm (NIHT) for the purpose of compressed sensing.
+We look at the NIHT algorithm from \cite{blumensath2010normalized}.
+Our NIHT algorithm implementation is one of several algorithms which are popular for compressed sensing \cite{blanchard2013gpu}.
+An example of a compressed sensing problem would be the linear system $Ax = b$ to represent the data from a signal.
+Here, $b$ represents observations from the signal, whereas the terms in $x$ are the coefficients of a decomposition of the signal, such as a Fourier transformation.
+We focus on the sparsity of the vector $x$, which we can exploit to effectively recover the solution.
+We show that the algorithm will converge to the correct solution under particular conditions.
+We consider how the likelihood of convergence depends on the properties of the system.
+
+\subsection{Solutions to SLEs}
+The setup for our problem is different to that of least squares.
+Previously, we were given $A$ and $b$, and had to minimise the function $||Ax-b||_2^2$.
+Now, we start with $A$ and $x$ and generate $b$. We are then given the problem of recovering the solution $x$ from only $A$ and $b$.
+Depending on properties of $A$ and $x$, we may or may not recover the original vector.
+
+Normalised iterative hard thresholding is an algorithm for finding a sparse solution to a system of linear equations.
+The system is often underdetermined, where $m < n$.
+However we include a sparsity parameter $k$.
+We say $x$ is $k$-sparse if it has at most $k$ entries which are non-zero.
+Then there are $m$ equations on $k$ non-zero unknowns and the system may be fully determined.
+If $m=1$, then we have one equation on the $k$ unknowns of $x$, which cannot be solved uniquely,
+whereas if $m=n$ then the problem can usually be solved.
+Recovery of $x$ depends on both the information $m$ and the sparsity $k$.
+
+Since we start with $A$ and $x$ to produce $b = Ax$, we can guarantee that the system has a solution by its construction.
+
+\subsection{Method}
+
+\begin{figure}
+    \centering
+    \includegraphics[width = \linewidth]{sdlsniht.eps}
+    \caption{
+        Map of $x$ similar to earlier seen in Figure \ref{fig:graddesc}.
+        We compare the steepest descent iteration (left) with the NIHT iteration on $k=2$ (right).
+        A random $3 \times 2$ matrix $A$ and a random vector $x^*$ of length $2$ are generated and we compute $b = Ax^*$.
+        Both algorithms solve $b=Ax$.
+        We observe identical paths towards the optimiser in this example.
+    }
+    \label{fig:versus}
+\end{figure}
+
+%figure of random variables
+\begin{figure}
+    \centering
+    \includegraphics[width=0.6\linewidth]{normdist.eps}
+    \caption{
+        Figure of the values generated in a $1000\times 1$ random matrix.
+        The values are clearly that of a Gaussian distribution,
+        with mean approximately $0$ and variance approximately $1$.
+    }
+    \label{fig:gauss}
+\end{figure}
+
+Normalised iterative hard thresholding is a greedy algorithm, meaning that at any point in time it will make the ``best" decision based on only current information.
+This is apparent in the thresholding implementation, especially since the thresholding of a random vector is likely unique.
+Thresholding the vector means we are losing information that we would otherwise consider in an algorithm such as gradient descent.
+
+In all our results, we consider matrices and vectors with random entries.
+We do this using an \texttt{initialise\_normal()} method which used the C++ standard library \texttt{rand()} function and applies the Box-M{\"u}ller transform to generate values randomly from a Gaussian distribution.
+See Figure \ref{fig:gauss} for the distribution from a random matrix.
+A random vector takes entries directly from the Gaussian distribution,
+but any random matrix takes entries $\eta/\sqrt{m}$, where $\eta$ is the random variable from the Gaussian distribution and $m$ is the number of rows of the matrix.
+This is such that the entries in a matrix have variance $1/m$.
+It is useful to be able to construct random matrices so that we can apply NIHT to different problems repeatedly.
+We generate an $m \times n$ matrix $A$ and an $n$-vector $x$. We threshold $x$ by the sparsity parameter $k$ and compute $b=Ax$.
+Starting with $x_0 = A^\mathrm{T}b$, iterate:
+\begin{equation*}
+    x_{i+1} = \mathcal{H}_k \left(
+        x_i + \alpha_i r_i
+    \right)
+\end{equation*}
+where $\alpha_i$ and $r_i$ are defined identically to how they were in the gradient descent method.
+
+The iteration continues until $||r||_2$ is sufficiently small.
+Our method itself is a modification of gradient descent applied to compressed sensing \cite{blanchard2013gpu}.
+See Figure \ref{fig:versus}, which shows the behaviour of both algorithms applied to the same problem.
+In this case, the paths are identical except for different starting points.
+This verifies that NIHT performs gradient descent for this example, especially since $k=2$ is the size of $x$ and so we consider no sparsity.
+It is important to note that we should not expect similar iteration performances between the two algorithms when working with very sparse and very full problems.
+
+% do a test here with NIHT and SDLS on a full problem. mention how NIHT will try to find a k sparse approximation.
+% do another test with NIHT and SDLS on a sparse problem.
+
+The function $\mathcal{H}_k(y)$ is the thresholding operation that sets all but the $k$ greatest-in-modulus entries in $y$ to zero.
+Thresholding is performed at every stage of the iteration, essentially projecting to a $k$-dimensional vector space.
+Our method \texttt{threshold(k)} copies the vector and sorts it by absolute value using our \texttt{abs\_cmp()} comparison function fed to the standard C++ \texttt{sort()} function.
+This standard library function has time complexity $\mathcal{O}(n \log n)$ where $n$ is the vector length \cite{cppreference.com}.
+In our function, we then take the $k$-th largest entry from the sorted vector, then iterate through the original vector and perform thresholding.
+Space complexity could be improved by avoiding copying the vector, but the copy allows us to perform sorting on a separate vector, get the value we need, and perform the threshold.
+
+%% about NIHT
+% NIHT performs gradient descent
+% can be computed on GPU
+
+\subsection{Testing and Results}
+
+\begin{figure}
+    \centering
+    \includegraphics[width = 0.75\linewidth]{sparsitylines.eps}
+    \caption{
+        Plots of the likelihood of convergence for sparsities $k = 20$ and $k=50$ on a vector $x$  of length $200$.
+        The probability of convergence changes as a function of $m$.
+        For $k=20$, the algorithm is likely to succeed for $m>120$.
+        For $k=50$, success is likely for $m>180$.
+        Likelihood estimated from $50$ samples for each combination of $k$ and $m$.
+    }
+    \label{fig:sparsitylines}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width = \linewidth]{sparsitycontour.eps}
+    \caption{
+        Contour graph of the likelihood of successful convergence as a function on both $k$ and $m$.
+        For a fixed sparsity $k$, we are more likely to solve the system with more information $m$.
+        If we instead fix $m$, the algorithm appears more likely to succeed for smaller values of $k$. 
+        Sparsity parameters tested are $k = 5, 10, \mathellipsis, 100$ and $m = 4, 9, \mathellipsis, 199$.
+        The value of $n$ is fixed at $200$.
+        For each combination of $k$ and $m$, we take $50$ samples to estimate the likelihood of success.
+    }
+    \label{fig:sparsitycontour}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width = \linewidth]{contoursqrt.eps}
+    \caption{
+        Line fitting to approximate the phase transition region.
+        Replicate of Figure \ref{fig:sparsitycontour} with weaker contour information,
+        and without scaling from dividing by $n=200$. 
+        The line marked in green is $y = \mathcal{O}(\sqrt{k})$ a constant scaling of $\sqrt{k}$.
+        Clearly, this curve is a close fit to the region in which the phase transition occurs.
+    }
+    \label{fig:bestfit}
+\end{figure}
+
+The \texttt{NIHT()} function performs the iteration given $A, b$ as well as a tolerance $\mathtt{tol}$ and integer $\mathtt{maxIterations}$.
+The function does also take $x$ passed by reference, but it is non constant and immediately changed to $x_0 = A^\mathrm{T}b$ as an initial guess.
+We give $x$ as an argument for the solution to be returned in, since the function returns the $\mathtt{int}$ number of iterations taken.
+The algorithm can take a long time to converge for large systems, so we need to perform some convergence testing.
+We have implemented a clause in the function for this.
+Before anything, we compute a relaxed tolerance $\mathtt{laxtol}$ which is the square root of the tolerance.
+If $\mathtt{tol}$ is $10^{-6}$, convergence testing considers the tolerance $10^{-3}$.
+Our testing statement checks that $||r||_2 > \mathtt{laxtol}$, i.e. we are not close to the required tolerance,
+and that $| ||x_{i-1}||_\infty - ||x_i||_\infty | < \mathtt{tol}$, i.e. the iteration is improving by a small amount at most.
+If these are satisfied then clearly the algorithm is stagnating, since we are not within the desired tolerance but $x$ is not changing enough after each iteration.
+The algorithm returns zero, which we regard as failure.
+
+The NIHT algorithm exhibits a phase transition in its likelihood to succeed depending on $k$ and $m$.
+A phase transition is where the behaviour of the algorithm changes abruptly as the parameters change.
+See Figure \ref{fig:sparsitylines}, where we have plotted two results for different sparsities.
+For low values of $m$, the algorithm initially fails.
+Once we reach a particular value, the probability of success grows rapidly to near certainty.
+Given $k$ fixed, if the algorithm is likely to succeed for some $m = m_0$ then it is also likely to succeed for all $m > m_0$.
+
+The likelihood of success is computed using the \texttt{stability()} function.
+Stability performs $T$ executions of NIHT, each time formulating a new system,
+and then outputs the proportion of those executions which solved the problem successfully.
+Success is evaluated under two criteria, one of which is that the NIHT claims completion in $>0$ iterations,
+since the algorithm returns zero if the solution fails.
+The other criterion is that the $L\infty$-norms of the original $x$ and the newly computed solution must vary by less than $10^{-3}$.
+Importantly, this does not check equality of the vectors. It only checks that the largest values by magnitude differ by a small amount.
+We implement this check because even if the algorithm succeeds,
+the new $x$ may have entries that are only close to the original, by a distance relating to the tolerance given to the \texttt{NIHT()} implementation.
+We may be concerned that this logic could lead to improper registration of success.
+However, since we are working with randomised systems,
+the likelihood of an incorrect solution having an $L\infty$-norm virtually equal to the correct solution is extremely unlikely.
+
+Figure \ref{fig:sparsitylines} indicates how the number of rows affects the algorithm.
+For $k=20$, we are working with a sparsity ratio of $0.1$. The requirement for success is visibly $m > 120$.
+If we increase $k$ to $50$, we have sparsity ratio $0.25$. We now require $m > 180$, which is closer to a full system.
+%% testing: interesting things about the phase transition
+
+See Figure \ref{fig:sparsitycontour}, where we have constructed a contour graphic of the phase transition behaviour.
+Our domain is $k = 5:5:100$ and $m = 4:5:199$ in MATLAB notation.
+For every combination, the probability is sampled from $50$ tests.
+This was chosen such that the entire result could be computed within a reasonable amount of time.
+The sparsity ratio is measured up to $k/n = 0.5$,
+since beyond this value we will clearly only observe failure.
+Likewise, the system information parameter $m/n$ is only measured up to $199/200$,
+since we are only testing NIHT for underdetermined systems.
+It is important to note that the results have a lot of noise.
+The region of failure is in blue and the region of success is yellow.
+The transition region between these disjoint subsets of the parameter space is a thin region of steep gradient. 
+In Figure \ref{fig:bestfit} we have found that, from our data, a line of the form $m = \alpha \sqrt{k}$ for scalar $\alpha$ approximates the curve defined by the phase transition region.
+The method for finding this relationship is based on results from \cite{amelunxen2014living}, mainly being Theorem 2 on phase transitions for linear inverse problems.
+These results do not apply directly to the NIHT algorithm since it does not belong to the same class of methods.
+
+% small k and high m tends to succeed a lot.
+% high k and small m tends to fail a lot.
+
+Our key result from our computations is that NIHT is often successful for a system with high sparsity.
+If the sparsity parameter $k$ is low, we can still find the $k$-sparse solution $x$ to the system even when $m<n$ such that the system is underdetermined.
+Intuitively this makes sense, since we are only considering $k$ non-zero unknowns in $x$.
+As $k$ increases, we must increase $m$ such that the algorithm has more information.
+If the problem is dense, it can be that NIHT fails to solve the system even if it is fully determined.
+For these denser problems, we would probably be more suited to implementing an algorithm like gradient descent,
+although we do not maintain the results we have for NIHT concerned with solving an underdetermined system correctly.
+
+\section{Conclusion}
+
+The normalised iterative hard thresholding algorithm is an effective method for finding a sparse solution of a linear system.
+We have shown how the behaviour of NIHT varies depending on a combination of the parameters of the linear system.
+Specifically, we have explored the properties of the phase transition.
+We have acknowledged that the phase transition for this method is not properly understood, but we have linked it to current results on phase transitions for optimisation methods.
+
+We have considered the relationship between applying NIHT to find a sparse solution, and using gradient descent to solve the least squares problem.
+Despite being extremely similar in terms of the instructions performed, both algorithms are well suited for very different problems.
+The traditional least squares problem is overdetermined, and we apply gradient descent to find a solution which satisfies none of the constraints but minimises a squared distance.
+In comparison, we have found that the NIHT method is most effective for underdetermined sparse problems and will often fail to solve fully determined systems.
+Out of the scope of this project is the implementation of more effective numerical methods.
+The gradient descent method is helpful to understand, but is often avoided in favour of a more effective algorithm such as conjugate gradient.
+Compressed sensing methods that use alternative methods are explored in \cite{blanchard2013gpu}.
+
+In the context of compressed sensing, we have explored the potential of NIHT to recover sparse solutions to linear systems.
+These systems often describe observations of signals for which we want to recover the entirety of the original information.
+Our priority is to reduce the stored information as much as possible, such that we can implement an algorithm to recover the signal entirely,
+and we do not consider any restrictions on the cost of the recovery algorithm we implement.
+We have shown that NIHT is an effective method for compressed sensing applications when the sparsity ratio is relatively low,
+in that it will correctly solve the underdetermined system for the original sparse vector used in formulating the problem.
+As the sparsity parameter increases, we are increasing the stored information and our problem becomes less about compression and more about solving a general linear system.
+As such, we have discussed how NIHT is less suited towards these problems, and that a method such as steepest descent is more appropriate.
+However we must always be aware that steepest descent has no guarantee on finding the desired solution when the problem is underdetermined.
+Our argument is that NIHT appears to be effective if and only if it is applied as a method in compressed sensing.
+
+\printbibliography
+
+
+\appendix
+
+\section{C++ Code Implementations}
+\label{sec:cpp}
+
+\subsection{Compiled Files}
+
+\texttt{main.cpp}
+\lstinputlisting[language=c++]{main.cpp}
+
+\texttt{mmatrix.cpp}
+\lstinputlisting[language=c++]{mmatrix.cpp}
+
+\texttt{mvector.cpp}
+\lstinputlisting[language=c++]{mvector.cpp}
+
+\subsection{Header Files}
+
+\texttt{mmatrix.h}
+\lstinputlisting[language=c++]{mmatrix.h}
+
+\texttt{mvector.h}
+\lstinputlisting[language=c++]{mvector.h}
+
+
+\section{Octave Results for Steepest Descent}
+\label{sec:oct}
+Replacing the third row of $A$ with $[1.8, -2]$.
+\begin{lstlisting}[language=MATLAB]
+octave:30> A(3,:) = [1.8, -2]
+A =
+    1.0000   2.0000
+    2.0000   1.0000
+    1.8000  -2.0000
+
+octave:31> [U,Z,V] = svd(A)
+U =
+    0.737098   0.045736   0.674236
+    0.563941   0.508121  -0.650987
+    -0.372367   0.860070   0.348743
+
+Z =
+Diagonal Matrix
+    3.0285        0
+        0   2.8405
+        0        0
+
+V =
+    0.3945   0.9189
+    0.9189  -0.3945
+
+octave:35> x = [   0.87027, 2.07243]'
+x =
+    0.8703
+    2.0724
+
+octave:36> (b-A*x)'*U
+ans =
+    7.0920e-06  -2.0202e-06   7.3933e+00
+\end{lstlisting}
+
+Replacing the third row of $A$ with $[-2, -2]$
+\begin{lstlisting}[language=MATLAB]
+octave:37> A(3,:) = [-2, -2]
+A =
+    1   2
+    2   1
+    -2  -2
+
+octave:38> x = [-4.70588, 6.29412]
+x =
+    -4.7059   6.2941
+
+octave:39> x = [-4.70588, 6.29412]'
+x =
+    -4.7059
+    6.2941
+
+octave:40> [U,Z,V] = svd(A)
+U =
+    -5.1450e-01   7.0711e-01   4.8507e-01
+    -5.1450e-01  -7.0711e-01   4.8507e-01
+    6.8599e-01  -1.8397e-16   7.2761e-01
+
+Z =
+Diagonal Matrix
+    4.1231        0
+        0   1.0000
+        0        0
+
+V =
+    -0.7071  -0.7071
+    -0.7071   0.7071
+
+octave:41> (b-A*x)'*U
+ans =
+    1.3720e-05  -7.4695e-16   4.3656e+00
+    
+\end{lstlisting}
+
+
+
+
+
+
+
+
+%% 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
+
+
+\end{document}
